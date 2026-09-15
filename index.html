@@ -323,6 +323,22 @@
   .legend-item .lname{flex:1;color:var(--ink-soft);}
   .legend-item .lval{font-family:'JetBrains Mono', monospace;font-weight:600;}
 
+  /* Chart fallback (used if Chart.js is unavailable) */
+  .chart-fallback{display:flex;flex-direction:column;gap:12px;padding:4px 0;overflow:auto;max-height:240px;}
+  .fallback-row{font-size:12.5px;}
+  .fallback-top{display:flex;justify-content:space-between;gap:10px;margin-bottom:5px;color:var(--ink-soft);}
+  .fallback-top span:last-child{font-family:'JetBrains Mono',monospace;font-weight:600;color:var(--ink);}
+  .fallback-track{height:8px;background:var(--paper-2);border:1px solid var(--line);overflow:hidden;flex:1;}
+  .fallback-fill{height:100%;min-width:0;}
+  .monthly-fallback{gap:14px;}
+  .monthly-fallback-row{border-bottom:1px solid var(--line);padding-bottom:10px;}
+  .monthly-fallback-row:last-child{border-bottom:none;}
+  .fallback-month{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;margin-bottom:7px;}
+  .fallback-line{display:flex;align-items:center;gap:7px;font-size:11px;margin:4px 0;}
+  .fallback-line .fallback-label{width:52px;color:var(--ink-soft);}
+  .fallback-line .fallback-track{height:6px;}
+  .fallback-line > span:last-child{font-family:'JetBrains Mono',monospace;min-width:76px;text-align:right;}
+
   /* Transactions view table */
   .table-toolbar{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;align-items:center;justify-content:space-between;}
   .search-input{
@@ -838,6 +854,12 @@
   }
 
   /* ============ FILTER BAR ============ */
+  function localISODate(date){
+    const y = date.getFullYear();
+    const m = String(date.getMonth()+1).padStart(2,'0');
+    const d = String(date.getDate()).padStart(2,'0');
+    return `${y}-${m}-${d}`;
+  }
   const dateFrom = document.getElementById('dateFrom');
   const dateTo = document.getElementById('dateTo');
   dateFrom.addEventListener('change', ()=>{ activeFilterPreset=null; updateChipState(); renderAll(); });
@@ -851,13 +873,13 @@
         dateFrom.value=''; dateTo.value=''; activeFilterPreset=null;
       } else if(preset === 'month'){
         const first = new Date(today.getFullYear(), today.getMonth(), 1);
-        dateFrom.value = first.toISOString().slice(0,10);
-        dateTo.value = today.toISOString().slice(0,10);
+        dateFrom.value = localISODate(first);
+        dateTo.value = localISODate(today);
         activeFilterPreset = 'month';
       } else if(preset === '30d'){
         const past = new Date(today); past.setDate(past.getDate()-30);
-        dateFrom.value = past.toISOString().slice(0,10);
-        dateTo.value = today.toISOString().slice(0,10);
+        dateFrom.value = localISODate(past);
+        dateTo.value = localISODate(today);
         activeFilterPreset = '30d';
       }
       updateChipState();
@@ -871,7 +893,13 @@
   }
 
   function getFilteredTransactions(){
-    let list = userData.transactions.slice();
+    let list = (Array.isArray(userData.transactions) ? userData.transactions : []).map(t => ({
+      ...t,
+      type: t.type === 'income' ? 'income' : 'expense',
+      amount: Number(t.amount) || 0,
+      category: String(t.category || 'Other'),
+      date: String(t.date || '')
+    })).filter(t => t.date && t.amount > 0);
     if(dateFrom.value) list = list.filter(t => t.date >= dateFrom.value);
     if(dateTo.value) list = list.filter(t => t.date <= dateTo.value);
     return list;
@@ -1063,41 +1091,102 @@
   }
 
   /* ============ CHARTS ============ */
+  function clearChartFallback(wrapper){
+    const old = wrapper.querySelector('.chart-fallback');
+    if(old) old.remove();
+  }
+
+  function renderCategoryFallback(wrapper, labels, values, total){
+    clearChartFallback(wrapper);
+    const box = document.createElement('div');
+    box.className = 'chart-fallback';
+    box.innerHTML = labels.map((label,i)=>{
+      const pct = total ? (values[i]/total*100) : 0;
+      return `<div class="fallback-row">
+        <div class="fallback-top"><span>${escapeHtml(label)}</span><span>${fmt(values[i])}</span></div>
+        <div class="fallback-track"><div class="fallback-fill" style="width:${pct.toFixed(1)}%;background:${CHART_COLORS[i%CHART_COLORS.length]}"></div></div>
+      </div>`;
+    }).join('');
+    wrapper.appendChild(box);
+  }
+
   function renderCategoryChart(){
     const list = getFilteredTransactions().filter(t=>t.type==='expense');
     const totals = {};
-    list.forEach(t=>{ totals[t.category] = (totals[t.category]||0) + t.amount; });
+    list.forEach(t=>{ totals[t.category] = (totals[t.category]||0) + Number(t.amount || 0); });
     const labels = Object.keys(totals);
     const values = Object.values(totals);
-    const ctx = document.getElementById('categoryChart').getContext('2d');
+    const canvas = document.getElementById('categoryChart');
+    const wrapper = canvas.parentElement;
     const legend = document.getElementById('categoryLegend');
 
-    if(categoryChartInstance) categoryChartInstance.destroy();
+    if(categoryChartInstance){
+      categoryChartInstance.destroy();
+      categoryChartInstance = null;
+    }
+    clearChartFallback(wrapper);
 
     if(!labels.length){
+      canvas.classList.remove('hidden');
       legend.innerHTML = '<div class="empty-state">No expenses in this period.</div>';
       return;
     }
+
     const total = values.reduce((a,b)=>a+b,0);
-    categoryChartInstance = new Chart(ctx, {
-      type: 'doughnut',
-      data: { labels, datasets: [{ data: values, backgroundColor: CHART_COLORS, borderWidth:2, borderColor:'#fffdf9' }] },
-      options: {
-        plugins: {
-          legend: { display:false },
-          tooltip: { callbacks: { label: (c)=> `${c.label}: ${fmt(c.raw)} (${((c.raw/total)*100).toFixed(1)}%)` } }
-        },
-        cutout: '62%'
-      }
-    });
+    // Always render the legend first, so it remains visible even if Chart.js fails to load.
     legend.innerHTML = labels.map((l,i)=>{
-      const pct = ((values[i]/total)*100).toFixed(1);
+      const pct = total ? ((values[i]/total)*100).toFixed(1) : '0.0';
       return `<div class="legend-item">
         <span class="legend-swatch" style="background:${CHART_COLORS[i%CHART_COLORS.length]}"></span>
         <span class="lname">${escapeHtml(l)}</span>
         <span class="lval">${fmt(values[i])} · ${pct}%</span>
       </div>`;
     }).join('');
+
+    if(typeof Chart === 'undefined'){
+      canvas.classList.add('hidden');
+      renderCategoryFallback(wrapper, labels, values, total);
+      return;
+    }
+
+    try{
+      canvas.classList.remove('hidden');
+      const ctx = canvas.getContext('2d');
+      categoryChartInstance = new Chart(ctx, {
+        type: 'doughnut',
+        data: { labels, datasets: [{ data: values, backgroundColor: CHART_COLORS, borderWidth:2, borderColor:'#fffdf9' }] },
+        options: {
+          responsive:true,
+          maintainAspectRatio:false,
+          plugins: {
+            legend: { display:false },
+            tooltip: { callbacks: { label: (c)=> `${c.label}: ${fmt(c.raw)} (${total ? ((c.raw/total)*100).toFixed(1) : '0.0'}%)` } }
+          },
+          cutout: '62%'
+        }
+      });
+    }catch(err){
+      console.warn('Category chart could not be rendered:', err);
+      canvas.classList.add('hidden');
+      renderCategoryFallback(wrapper, labels, values, total);
+    }
+  }
+
+  function renderMonthlyFallback(wrapper, labels, incomeData, expenseData){
+    clearChartFallback(wrapper);
+    const max = Math.max(...incomeData, ...expenseData, 1);
+    const box = document.createElement('div');
+    box.className = 'chart-fallback monthly-fallback';
+    box.innerHTML = labels.map((label,i)=>{
+      const incomePct = incomeData[i]/max*100;
+      const expensePct = expenseData[i]/max*100;
+      return `<div class="monthly-fallback-row">
+        <div class="fallback-month">${escapeHtml(label)}</div>
+        <div class="fallback-line"><span class="fallback-label">Income</span><div class="fallback-track"><div class="fallback-fill" style="width:${incomePct.toFixed(1)}%;background:#3c6e52"></div></div><span>${fmt(incomeData[i])}</span></div>
+        <div class="fallback-line"><span class="fallback-label">Expenses</span><div class="fallback-track"><div class="fallback-fill" style="width:${expensePct.toFixed(1)}%;background:#b5502f"></div></div><span>${fmt(expenseData[i])}</span></div>
+      </div>`;
+    }).join('');
+    wrapper.appendChild(box);
   }
 
   function renderMonthlyChart(){
@@ -1105,46 +1194,69 @@
     const months = {};
     list.forEach(t=>{
       const key = t.date.slice(0,7);
+      if(!/^\d{4}-\d{2}$/.test(key)) return;
       if(!months[key]) months[key] = { income:0, expense:0 };
-      months[key][t.type] += t.amount;
+      months[key][t.type] += Number(t.amount || 0);
     });
+
     const keys = Object.keys(months).sort().slice(-6);
     const labels = keys.map(k=>{
       const [y,m] = k.split('-');
-      return new Date(y, m-1, 1).toLocaleDateString(undefined,{month:'short', year:'2-digit'});
+      return new Date(Number(y), Number(m)-1, 1).toLocaleDateString(undefined,{month:'short', year:'2-digit'});
     });
     const incomeData = keys.map(k=>months[k].income);
     const expenseData = keys.map(k=>months[k].expense);
 
-    const canvasEl = document.getElementById('monthlyChart');
+    const canvas = document.getElementById('monthlyChart');
+    const wrapper = canvas.parentElement;
     const emptyEl = document.getElementById('monthlyEmpty');
-    if(monthlyChartInstance) monthlyChartInstance.destroy();
+
+    if(monthlyChartInstance){
+      monthlyChartInstance.destroy();
+      monthlyChartInstance = null;
+    }
+    clearChartFallback(wrapper);
 
     if(!keys.length){
-      canvasEl.classList.add('hidden');
+      canvas.classList.add('hidden');
       emptyEl.classList.remove('hidden');
       return;
     }
-    canvasEl.classList.remove('hidden');
+
     emptyEl.classList.add('hidden');
-    const ctx = canvasEl.getContext('2d');
-    monthlyChartInstance = new Chart(ctx, {
-      type: 'bar',
-      data: {
-        labels,
-        datasets: [
-          { label:'Income', data: incomeData, backgroundColor: '#3c6e52' },
-          { label:'Expenses', data: expenseData, backgroundColor: '#b5502f' }
-        ]
-      },
-      options: {
-        plugins: { legend: { position:'bottom', labels:{ boxWidth:10, font:{family:"'JetBrains Mono', monospace", size:11} } } },
-        scales: {
-          x: { grid:{display:false} },
-          y: { grid:{color:'#e6e3da'}, ticks:{ callback:(v)=> fmt(v) } }
+    if(typeof Chart === 'undefined'){
+      canvas.classList.add('hidden');
+      renderMonthlyFallback(wrapper, labels, incomeData, expenseData);
+      return;
+    }
+
+    try{
+      canvas.classList.remove('hidden');
+      const ctx = canvas.getContext('2d');
+      monthlyChartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [
+            { label:'Income', data: incomeData, backgroundColor: '#3c6e52' },
+            { label:'Expenses', data: expenseData, backgroundColor: '#b5502f' }
+          ]
+        },
+        options: {
+          responsive:true,
+          maintainAspectRatio:false,
+          plugins: { legend: { position:'bottom', labels:{ boxWidth:10, font:{family:"'JetBrains Mono', monospace", size:11} } } },
+          scales: {
+            x: { grid:{display:false} },
+            y: { beginAtZero:true, grid:{color:'#e6e3da'}, ticks:{ callback:(v)=> fmt(v) } }
+          }
         }
-      }
-    });
+      });
+    }catch(err){
+      console.warn('Monthly chart could not be rendered:', err);
+      canvas.classList.add('hidden');
+      renderMonthlyFallback(wrapper, labels, incomeData, expenseData);
+    }
   }
 
   /* ============ RENDER: TRANSACTIONS TABLE ============ */
